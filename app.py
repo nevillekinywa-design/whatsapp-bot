@@ -1,13 +1,11 @@
 import os
 
-import anthropic
-from dotenv import load_dotenv
+import requests
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 
-load_dotenv()
-
-MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-lite-latest")
 SYSTEM_PROMPT = (
     "You are a helpful assistant chatting on WhatsApp. "
     "Keep replies short and conversational. Avoid heavy markdown."
@@ -15,25 +13,30 @@ SYSTEM_PROMPT = (
 MAX_TURNS = 20
 
 app = Flask(__name__)
-claude = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from .env
 histories: dict[str, list[dict]] = {}  # resets when the app restarts
 
 
-def ask_claude(user: str, text: str) -> str:
+def ask_gemini(user: str, text: str) -> str:
     history = histories.setdefault(user, [])
-    history.append({"role": "user", "content": text})
+    history.append({"role": "user", "parts": [{"text": text}]})
     del history[:-MAX_TURNS]
     while history and history[0]["role"] != "user":
         history.pop(0)
 
-    resp = claude.messages.create(
-        model=MODEL,
-        max_tokens=600,
-        system=SYSTEM_PROMPT,
-        messages=history,
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+    r = requests.post(
+        url,
+        headers={"x-goog-api-key": GEMINI_API_KEY},
+        json={
+            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": history,
+        },
+        timeout=12,
     )
-    reply = "".join(b.text for b in resp.content if b.type == "text")
-    history.append({"role": "assistant", "content": reply})
+    r.raise_for_status()
+    parts = r.json()["candidates"][0]["content"]["parts"]
+    reply = "".join(p.get("text", "") for p in parts).strip()
+    history.append({"role": "model", "parts": [{"text": reply}]})
     return reply
 
 
@@ -47,9 +50,9 @@ def whatsapp():
         twiml.message("I can only read text messages for now.")
     else:
         try:
-            twiml.message(ask_claude(sender, text)[:1500])
+            twiml.message(ask_gemini(sender, text)[:1500])
         except Exception:
-            app.logger.exception("Claude error")
+            app.logger.exception("Gemini error")
             twiml.message("Sorry, something went wrong. Try again in a moment.")
     return str(twiml), 200, {"Content-Type": "application/xml"}
 
